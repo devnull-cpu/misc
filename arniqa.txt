@@ -1,0 +1,12 @@
+PyTorch (ResNet50 backbone):
+https://download.pytorch.org/models/resnet50-0676ba61.pth
+HuggingFace (ARNIQA weights):
+https://huggingface.co/chaofengc/IQA-PyTorch-Weights/resolve/main/ARNIQA.pth
+https://huggingface.co/chaofengc/IQA-PyTorch-Weights/resolve/main/regressor_kadid10k.pth
+https://huggingface.co/chaofengc/IQA-PyTorch-Weights/resolve/main/regressor_koniq10k.pth
+https://huggingface.co/chaofengc/IQA-PyTorch-Weights/resolve/main/regressor_live.pth
+https://huggingface.co/chaofengc/IQA-PyTorch-Weights/resolve/main/regressor_csiq.pth
+https://huggingface.co/chaofengc/IQA-PyTorch-Weights/resolve/main/regressor_tid2013.pth
+https://huggingface.co/chaofengc/IQA-PyTorch-Weights/resolve/main/regressor_clive.pth
+https://huggingface.co/chaofengc/IQA-PyTorch-Weights/resolve/main/regressor_flive.pth
+https://huggingface.co/chaofengc/IQA-PyTorch-Weights/resolve/main/regressor_spaq.pth
