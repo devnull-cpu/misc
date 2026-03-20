@@ -1,6 +1,6 @@
 From 1a3e5d45ea127700a7890ab32ef681333b069bfa Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 09:15:00 +0000
+Date: Thu, 19 Mar 2026 09:15:00 +0000
 Subject: [PATCH 01/22] Add DMS integration notes and technical reference
 
 Documentation for integrating Dynamic Memory Sparsification (DMS)
@@ -697,7 +697,7 @@ index 000000000..698450d4c
 
 From 7b2c75612496938bf77991f357389a1fc56d8351 Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 09:27:00 +0000
+Date: Thu, 19 Mar 2026 09:32:00 +0000
 Subject: [PATCH 02/22] Update docs
 
 ---
@@ -898,7 +898,7 @@ index 698450d4c..48845f620 100644
 
 From cd29183f9bcbc345a760333b387550b62fbd4567 Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 09:39:00 +0000
+Date: Thu, 19 Mar 2026 10:05:00 +0000
 Subject: [PATCH 03/22] Add DMS (Dynamic Memory Sparsification) Phase 1
  integration
 MIME-Version: 1.0
@@ -3592,7 +3592,7 @@ index 000000000..e724ff8fc
 
 From ca2cf5f95c441995e62fb3a4f9f096466561e8eb Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 09:51:00 +0000
+Date: Thu, 19 Mar 2026 10:22:00 +0000
 Subject: [PATCH 04/22] Reset DMS state when requests finish
 
 Add class-level registry of DMSFlashAttentionImpl instances so that
@@ -3673,7 +3673,7 @@ index 9267e1874..3cbd27878 100644
 
 From 819994162b9668e21ede93091dea6a18459f0afd Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 10:03:00 +0000
+Date: Thu, 19 Mar 2026 10:41:00 +0000
 Subject: [PATCH 05/22] Prevent block over-allocation for DMS requests
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3836,7 +3836,7 @@ index 07486e368..0bbdb9f53 100644
 
 From 12493d73728a95548064d4812d6cc9281bd94f02 Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 10:15:00 +0000
+Date: Thu, 19 Mar 2026 11:08:00 +0000
 Subject: [PATCH 06/22] Fix DMS runtime and add diagnostic tests proving
  eviction works
 MIME-Version: 1.0
@@ -4653,7 +4653,7 @@ index 8f15e4c44..55f05f13a 100644
 
 From f1b5067deaab2080a700228ba401b5c7716cd7a6 Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 10:27:00 +0000
+Date: Thu, 19 Mar 2026 11:35:00 +0000
 Subject: [PATCH 07/22] Add Triton paged decode kernel for DMS per-head
  attention
 
@@ -5519,7 +5519,7 @@ index 000000000..517459c38
 
 From b59b61584fc0eca8a29585a033a0fe87f0dc1d15 Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 10:39:00 +0000
+Date: Thu, 19 Mar 2026 11:52:00 +0000
 Subject: [PATCH 08/22] Fuse DMS cache update into Triton kernel and reduce
  Python overhead
 MIME-Version: 1.0
@@ -6225,7 +6225,7 @@ index 000000000..3d9c38f2b
 
 From 0f5e64d5f0d45d15d1236c51a3f14bcff0d89314 Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 10:51:00 +0000
+Date: Thu, 19 Mar 2026 12:14:00 +0000
 Subject: [PATCH 09/22] Vectorize DMS prefill compaction (16x faster)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -6554,7 +6554,7 @@ index 523f37c78..f31712ec6 100644
 
 From ed9e7567c8cd00fcbfbd9b3a21f8ce7fc723ab2e Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 11:03:00 +0000
+Date: Thu, 19 Mar 2026 12:38:00 +0000
 Subject: [PATCH 10/22] Enable CUDAGraph support for DMS decode (2.5x speedup)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -7076,7 +7076,7 @@ index 517459c38..94dd5b370 100644
 
 From 14514ebac9693171a6a5d8ca8971d3359b082061 Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 11:15:00 +0000
+Date: Thu, 19 Mar 2026 12:55:00 +0000
 Subject: [PATCH 11/22] Add early return for padding in Triton decode kernel
  (70.3 tok/s)
 
@@ -7198,7 +7198,7 @@ index 94dd5b370..fdc90f4c6 100644
 
 From 475a555f67cda74b718cb7cdefc8bef752311c9b Mon Sep 17 00:00:00 2001
 From: Anonymous <anonymous@users.noreply.github.com>
-Date: Thu, 20 Mar 2026 11:27:00 +0000
+Date: Thu, 19 Mar 2026 13:10:00 +0000
 Subject: [PATCH 12/22] Single-pass fused prefill: raw K/V attention +
  selective cache write
 MIME-Version: 1.0
