@@ -11841,3 +11841,775 @@ index 11d7e25f4..41167d887 100644
 -- 
 2.46.0
 
+From 9c315728f946d8587998b821d83646fd7fa96d45 Mon Sep 17 00:00:00 2001
+From: Anonymous <anonymous@users.noreply.github.com>
+Date: Sat, 22 Mar 2026 11:15:00 +0000
+Subject: [PATCH 23/24] Remove dead per-head decode fallback
+ (_forward_decode_per_head)
+
+Superseded by the Split-K v2 Triton kernel, no longer called anywhere.
+
+---
+ vllm/v1/attention/backends/dms_flash_attn.py | 112 -------------------
+ 1 file changed, 112 deletions(-)
+
+diff --git a/vllm/v1/attention/backends/dms_flash_attn.py b/vllm/v1/attention/backends/dms_flash_attn.py
+index ca2f3b363..8303bea1e 100644
+--- a/vllm/v1/attention/backends/dms_flash_attn.py
++++ b/vllm/v1/attention/backends/dms_flash_attn.py
+@@ -742,118 +742,6 @@ class DMSFlashAttentionImpl(AttentionImpl):
+                 self.kv_cache_dtype, layer._k_scale, layer._v_scale,
+             )
+ 
+-    def _forward_decode_per_head(
+-        self,
+-        query: torch.Tensor,
+-        key_cache: torch.Tensor,
+-        value_cache: torch.Tensor,
+-        output: torch.Tensor,
+-        per_head_seq_lens: torch.Tensor,
+-        per_head_block_table: torch.Tensor,
+-        layer: torch.nn.Module,
+-    ) -> torch.Tensor:
+-        """Decode with per-head seq_lens by iterating over KV heads.
+-
+-        vLLM's KV cache stores all heads in shared blocks:
+-        cache[block_id, offset, head, :]. flash_attn_varlen_func reads
+-        all heads from each block, so we can't use the batch×head
+-        flattening trick directly. Instead, we call flash_attn once
+-        per KV head with a single-head cache view and that head's
+-        seq_lens.
+-
+-        This is num_kv_heads calls per layer (8 for Qwen3-8B).
+-        A custom kernel could fuse this in Phase 3.
+-        """
+-        batch_size = query.shape[0]
+-        q_per_kv = self.num_queries_per_kv
+-        block_table = per_head_block_table[:batch_size]  # (num_reqs, max_blocks)
+-
+-        # Q: (batch, num_q_heads, head_dim) → (batch, num_kv_heads, q_per_kv, head_dim)
+-        q_by_kv_head = query.view(
+-            batch_size, self.num_kv_heads, q_per_kv, self.head_size
+-        )
+-
+-        # cu_seqlens_q for a batch of single-token decode requests,
+-        # each with q_per_kv query heads.
+-        cu_seqlens_q = torch.arange(
+-            0,
+-            (batch_size + 1) * q_per_kv,
+-            q_per_kv,
+-            dtype=torch.int32,
+-            device=query.device,
+-        )
+-
+-        descale_shape = (batch_size, 1)
+-        q_descale = layer._q_scale.expand(descale_shape)
+-        k_descale = layer._k_scale.expand(descale_shape)
+-        v_descale = layer._v_scale.expand(descale_shape)
+-
+-        # Output buffer: (batch, num_kv_heads, q_per_kv, head_dim)
+-        out_by_head = torch.empty(
+-            batch_size, self.num_kv_heads, q_per_kv, self.head_size,
+-            dtype=query.dtype,
+-            device=query.device,
+-        )
+-
+-        for h in range(self.num_kv_heads):
+-            # Per-head seq_lens: extract every num_kv_heads-th entry.
+-            head_seq_lens = per_head_seq_lens[h::self.num_kv_heads][:batch_size]
+-            max_seq_len_k = int(head_seq_lens.max().item()) if batch_size > 0 else 0
+-
+-            if max_seq_len_k == 0:
+-                out_by_head[:, h].zero_()
+-                continue
+-
+-            # Extract single-head KV cache views.
+-            # key_cache: (num_blocks, block_size, num_kv_heads, head_size)
+-            # → select head h → (num_blocks, block_size, head_size)
+-            # → unsqueeze to (num_blocks, block_size, 1, head_size)
+-            k_head = key_cache[:, :, h:h+1, :].contiguous()
+-            v_head = value_cache[:, :, h:h+1, :].contiguous()
+-
+-            # Q for this KV head group: (batch, q_per_kv, head_size)
+-            q_head = q_by_kv_head[:, h, :, :]  # (batch, q_per_kv, head_size)
+-            # Flatten to (batch * q_per_kv, 1, head_size) for flash_attn.
+-            q_flat = q_head.reshape(batch_size * q_per_kv, 1, self.head_size)
+-
+-            out_head = torch.empty(
+-                batch_size * q_per_kv, 1, self.head_size,
+-                dtype=query.dtype,
+-                device=query.device,
+-            )
+-
+-            flash_attn_varlen_func(
+-                q=q_flat,
+-                k=k_head,
+-                v=v_head,
+-                out=out_head,
+-                cu_seqlens_q=cu_seqlens_q,
+-                max_seqlen_q=q_per_kv,
+-                seqused_k=head_seq_lens,
+-                max_seqlen_k=max_seq_len_k,
+-                softmax_scale=self.scale,
+-                causal=True,
+-                alibi_slopes=self.alibi_slopes,
+-                window_size=list(self.sliding_window),
+-                block_table=block_table,
+-                softcap=self.logits_soft_cap,
+-                fa_version=self.vllm_flash_attn_version,
+-                q_descale=q_descale,
+-                k_descale=k_descale,
+-                v_descale=v_descale,
+-            )
+-
+-            # Store: (batch * q_per_kv, 1, head_size) → (batch, q_per_kv, head_size)
+-            out_by_head[:, h] = out_head.squeeze(1).view(
+-                batch_size, q_per_kv, self.head_size
+-            )
+-
+-        # Reshape: (batch, num_kv_heads, q_per_kv, head_dim) → (batch, num_q_heads, head_dim)
+-        output[:batch_size] = out_by_head.reshape(
+-            batch_size, self.num_heads, self.head_size
+-        )
+-        return output
+-
+     def do_kv_cache_update(
+         self,
+         layer: torch.nn.Module,
+-- 
+2.46.0
+
+From 80ee351b23b0629c80368d86084590544f8e8ce0 Mon Sep 17 00:00:00 2001
+From: Anonymous <anonymous@users.noreply.github.com>
+Date: Sat, 22 Mar 2026 14:30:00 +0000
+Subject: [PATCH 24/24] Window-aware CoW for DMS prefix caching
+
+DMS only writes to KV positions within its decode window (window_size=512).
+When suffix >= window_size, no prefix blocks are at risk and zero CoW
+blocks are needed. Otherwise only ceil((window_size - suffix) / block_size)
+tail blocks need CoW.
+
+Also fixes CoW block counting to use pre-allocation block list
+(blocks aren't in req_to_blocks yet at budget time).
+
+Benchmark: add --suffix, --compile, --sequential, --max-tokens flags,
+batched warm requests, DMS ON/OFF comparison.
+
+---
+ tests/v1/attention/bench_prefix_cache.py     | 302 ++++++++++++++++---
+ tests/v1/attention/test_dms.py               |   1 +
+ vllm/v1/core/kv_cache_coordinator.py         |  35 ++-
+ vllm/v1/core/kv_cache_manager.py             |  73 ++++-
+ vllm/v1/core/sched/scheduler.py              |   5 +-
+ vllm/v1/core/single_type_kv_cache_manager.py |  36 ++-
+ 6 files changed, 380 insertions(+), 72 deletions(-)
+
+diff --git a/tests/v1/attention/bench_prefix_cache.py b/tests/v1/attention/bench_prefix_cache.py
+index 3dc784c29..2f62878a9 100644
+--- a/tests/v1/attention/bench_prefix_cache.py
++++ b/tests/v1/attention/bench_prefix_cache.py
+@@ -3,14 +3,21 @@
+ """Benchmark prefix caching with DMS: measures TTFT improvement.
+ 
+ Sends multiple requests with a shared prefix. The first request computes
+-the prefix from scratch; subsequent requests should hit prefix cache
+-(with CoW for DMS), giving faster TTFT.
++the prefix from scratch; subsequent requests should hit prefix cache,
++giving faster TTFT.
+ 
+ Usage:
+-    python tests/v1/attention/bench_prefix_cache.py
++    python tests/v1/attention/bench_prefix_cache.py [prefix_tokens] [options]
++
++    prefix_tokens: approximate target prefix length in tokens (default: 2048).
++    --suffix N: add ~N tokens of unique suffix padding per request.
++    --compile: disable enforce_eager (allow torch.compile/CUDAGraphs).
++    --sequential: send warm requests one at a time instead of batched.
++    --max-tokens N: generate N tokens per request (default: 1, TTFT only).
+ """
+ 
+ import os
++import sys
+ import time
+ 
+ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+@@ -22,8 +29,8 @@ MODEL_PATH = os.path.normpath(os.path.join(
+     "..", "..", "..", "models", "Qwen3-8B-DMS-8x-4bit-NF4",
+ ))
+ 
+-# Shared system prompt (~200 tokens).
+-SHARED_PREFIX = (
++# Base system prompt (~130 tokens). Repeated to reach target length.
++_BASE_PREFIX = (
+     "You are an expert AI assistant specializing in science and technology. "
+     "You provide detailed, accurate, and well-structured answers. "
+     "When answering questions, consider multiple perspectives and cite "
+@@ -38,6 +45,42 @@ SHARED_PREFIX = (
+     "increase over time. "
+ )
+ 
++# Filler sentences to pad the prefix to target length (~10 tokens each).
++_FILLER = [
++    "The speed of light in vacuum is approximately 299792458 meters per second. ",
++    "Quantum mechanics describes nature at the smallest scales of energy. ",
++    "General relativity explains gravity as curvature of spacetime geometry. ",
++    "The human genome contains approximately three billion base pairs total. ",
++    "Photosynthesis converts carbon dioxide and water into glucose and oxygen. ",
++    "The periodic table organizes chemical elements by atomic number order. ",
++    "Mitochondria are the powerhouses of the cell producing ATP energy. ",
++    "The Heisenberg uncertainty principle limits simultaneous measurement precision. ",
++    "Dark energy accounts for approximately sixty eight percent of universe. ",
++    "Natural selection drives evolution through differential reproductive success rates. ",
++    "The standard model describes fundamental particles and their interactions precisely. ",
++    "Plate tectonics explains the movement of Earths lithospheric plates continuously. ",
++    "Neurotransmitters are chemical messengers that transmit signals across synapses. ",
++    "The Krebs cycle is a series of chemical reactions in cells. ",
++    "Electromagnetic radiation includes radio waves visible light and gamma rays. ",
++    "Superconductivity occurs when certain materials have zero electrical resistance below critical temperature. ",
++    "The Drake equation estimates the number of communicating civilizations in galaxy. ",
++    "Crispr Cas9 is a revolutionary gene editing technology derived from bacteria. ",
++    "Black holes are regions of spacetime where gravity prevents anything escaping. ",
++    "The cosmic microwave background radiation is the afterglow of the big bang. ",
++]
++
++
++def _build_prefix(target_tokens: int) -> str:
++    """Build a prefix string of approximately target_tokens length."""
++    prefix = _BASE_PREFIX
++    chars_per_token = 4.0
++    while len(prefix) / chars_per_token < target_tokens:
++        for filler in _FILLER:
++            prefix += filler
++            if len(prefix) / chars_per_token >= target_tokens:
++                break
++    return prefix
++
+ QUESTIONS = [
+     "What is quantum entanglement?",
+     "Explain the theory of relativity.",
+@@ -50,9 +93,159 @@ QUESTIONS = [
+ ]
+ 
+ 
++_SUFFIX_FILLER = [
++    "The Mariana Trench reaches depths of nearly eleven thousand meters below surface. ",
++    "Bioluminescence is the production of light by living organisms in nature. ",
++    "The Voyager spacecraft carries a golden record with sounds of Earth aboard. ",
++    "Coral reefs support approximately twenty five percent of all marine species diversity. ",
++    "The human brain contains roughly eighty six billion neurons forming connections. ",
++    "Geothermal energy harnesses heat from deep within the Earth for power generation. ",
++    "The aurora borealis is caused by charged particles interacting with atmosphere gases. ",
++    "Tectonic plates move at rates comparable to the growth of human fingernails. ",
++    "Deep sea hydrothermal vents support life without any sunlight energy source. ",
++    "The observable universe has a diameter of approximately ninety three billion light years. ",
++    "Tardigrades can survive extreme temperatures radiation and the vacuum of outer space. ",
++    "The Great Barrier Reef is the largest living structure visible from orbital space. ",
++    "Magnetars are neutron stars with the strongest magnetic fields in the known universe. ",
++    "The Amazon rainforest produces approximately twenty percent of the worlds atmospheric oxygen. ",
++    "Quantum tunneling allows particles to pass through energy barriers they cannot classically overcome. ",
++    "The speed of sound varies depending on the medium through which it travels. ",
++    "Extremophiles are organisms that thrive in conditions considered inhospitable to most life. ",
++    "The Fibonacci sequence appears frequently in natural patterns like sunflower seed arrangements. ",
++    "Gravitational waves were first directly detected by the LIGO observatory in 2015. ",
++    "The deep ocean remains largely unexplored with new species discovered on every expedition. ",
++]
++
++
++def _build_suffix_padding(target_tokens: int) -> str:
++    """Build suffix padding using text distinct from prefix filler."""
++    if target_tokens <= 0:
++        return ""
++    padding = ""
++    chars_per_token = 4.0
++    idx = 0
++    while len(padding) / chars_per_token < target_tokens:
++        padding += _SUFFIX_FILLER[idx % len(_SUFFIX_FILLER)]
++        idx += 1
++    return padding
++
++
++def _run_ttft(llm, shared_prefix, label, suffix_tokens=0,
++              sequential=False, max_tokens=1):
++    """Run TTFT measurements for a given mode.
++
++    First request is sent alone (COLD — populates prefix cache).
++    Remaining requests are sent as a single batch (WARM — concurrent
++    sharing of prefix blocks, ref_cnt > 1, triggers CoW), unless
++    --sequential is set, in which case they're sent one at a time.
++    """
++    params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
++
++    print(f"\n{'=' * 60}")
++    print(f"  {label}")
++    print(f"{'=' * 60}")
++
++    # Cold request: populates prefix cache.
++    cold_suffix = f"[REQ 0] {_build_suffix_padding(suffix_tokens)}" \
++        if suffix_tokens > 0 else ""
++    cold_prompt = shared_prefix + cold_suffix + QUESTIONS[0]
++    t0 = time.perf_counter()
++    cold_out = llm.generate([cold_prompt], params)
++    t1 = time.perf_counter()
++    cold_ttft = t1 - t0
++    cold_tokens = len(cold_out[0].prompt_token_ids)
++    cold_out_tokens = len(cold_out[0].outputs[0].token_ids)
++    print(f"  [COLD] Request 0: {cold_ttft*1000:.1f}ms "
++          f"(in={cold_tokens}, out={cold_out_tokens})")
++
++    # Warm requests: each gets a unique suffix so it won't be cached.
++    warm_prompts = []
++    for i, q in enumerate(QUESTIONS[1:], 1):
++        suf = f"[REQ {i}] {_build_suffix_padding(suffix_tokens)}" \
++            if suffix_tokens > 0 else ""
++        warm_prompts.append(shared_prefix + suf + q)
++
++    if sequential:
++        # One at a time — isolates per-request TTFT.
++        warm_ttfts = []
++        for i, prompt in enumerate(warm_prompts):
++            t0 = time.perf_counter()
++            out = llm.generate([prompt], params)
++            t1 = time.perf_counter()
++            elapsed = t1 - t0
++            warm_ttfts.append(elapsed)
++            tokens_in = len(out[0].prompt_token_ids)
++            tokens_out = len(out[0].outputs[0].token_ids)
++            print(f"  [WARM] Request {i+1}: {elapsed*1000:.1f}ms "
++                  f"(in={tokens_in}, out={tokens_out})")
++        avg_warm = sum(warm_ttfts) / len(warm_ttfts)
++    else:
++        # Batched — concurrent prefix sharing (ref_cnt > 1, triggers CoW).
++        t0 = time.perf_counter()
++        warm_outs = llm.generate(warm_prompts, params)
++        t1 = time.perf_counter()
++        batch_elapsed = t1 - t0
++        avg_warm = batch_elapsed / len(warm_prompts)
++        for i, out in enumerate(warm_outs):
++            tokens_in = len(out.prompt_token_ids)
++            tokens_out = len(out.outputs[0].token_ids)
++            print(f"  [WARM] Request {i+1}: (in={tokens_in}, out={tokens_out})")
++        print(f"  Warm batch: {batch_elapsed*1000:.1f}ms "
++              f"({len(warm_prompts)} reqs, "
++              f"avg {avg_warm*1000:.1f}ms/req)")
++
++    print(f"\n  Cold TTFT: {cold_ttft*1000:.1f}ms")
++    print(f"  Avg warm TTFT: {avg_warm*1000:.1f}ms")
++    if cold_ttft > 0 and avg_warm > 0:
++        speedup = cold_ttft / avg_warm
++        saved_ms = (cold_ttft - avg_warm) * 1000
++        print(f"  Speedup: {speedup:.2f}x")
++        print(f"  Saved: {saved_ms:.1f}ms per request")
++
++    return cold_ttft, avg_warm
++
++
+ def bench_prefix_cache():
++    # Parse args.
++    target_tokens = 2048
++    suffix_tokens = 0  # 0 = use short questions only
++    eager = True
++    sequential = False
++    max_tokens = 1
++    args = sys.argv[1:]
++    for i, arg in enumerate(args):
++        if arg == "--suffix" and i + 1 < len(args):
++            suffix_tokens = int(args[i + 1])
++        elif arg == "--max-tokens" and i + 1 < len(args):
++            max_tokens = int(args[i + 1])
++        elif arg == "--compile":
++            eager = False
++        elif arg == "--sequential":
++            sequential = True
++        elif not arg.startswith("--") and (i == 0 or args[i - 1] not in ("--suffix", "--max-tokens")):
++            target_tokens = int(arg)
++
++    # Build separate prefixes for DMS ON vs OFF to avoid cache contamination.
++    # Unique tag at START so all block hashes differ (vLLM hashes
++    # blocks in chunks of block_size tokens from the beginning).
++    prefix_on = f"[BENCH MODE=on] " + _build_prefix(target_tokens)
++    prefix_off = f"[BENCH MODE=off] " + _build_prefix(target_tokens)
++
++    # Set max_model_len based on prefix + suffix + output length.
++    max_model_len = max(2048, target_tokens + suffix_tokens + max_tokens + 256)
++    # Round up to power of 2 for cleaner allocation.
++    ml = 2048
++    while ml < max_model_len:
++        ml *= 2
++    max_model_len = ml
++
+     print(f"Model: {MODEL_PATH}")
+-    print(f"Shared prefix length: ~{len(SHARED_PREFIX.split())} words")
++    print(f"Target prefix: ~{target_tokens} tokens")
++    print(f"Suffix padding: ~{suffix_tokens} tokens")
++    print(f"Max model len: {max_model_len}")
++    print(f"Eager: {eager}")
++    print(f"Sequential: {sequential}")
++    print(f"Max tokens: {max_tokens}")
+     print(f"Number of requests: {len(QUESTIONS)}")
+ 
+     llm = LLM(
+@@ -60,54 +253,67 @@ def bench_prefix_cache():
+         quantization="bitsandbytes",
+         load_format="bitsandbytes",
+         dtype="bfloat16",
+-        max_model_len=2048,
++        max_model_len=max_model_len,
+         gpu_memory_utilization=0.7,
+-        enforce_eager=True,
++        enforce_eager=eager,
+     )
+ 
+-    params = SamplingParams(max_tokens=64, temperature=0.0)
++    # Warm up with a full-length prompt to get GPU caches/TLBs hot.
++    # Uses unique text so it doesn't contaminate any mode's prefix cache.
++    warmup_prefix = "[WARMUP] " + _build_prefix(target_tokens)
++    params_wu = SamplingParams(max_tokens=1, temperature=0.0)
++    for q in QUESTIONS[:3]:
++        llm.generate([warmup_prefix + q], params_wu)
++    print("Warmup done (3 full-length requests).")
+ 
+-    # Warm up.
+-    llm.generate(["Hello"], params)
++    results = {}
+ 
+-    # Sequential requests to measure individual TTFT.
+-    ttfts = []
+-    for i, question in enumerate(QUESTIONS):
+-        prompt = SHARED_PREFIX + question
+-        t0 = time.perf_counter()
+-        out = llm.generate([prompt], params)
+-        t1 = time.perf_counter()
+-        tokens_out = len(out[0].outputs[0].token_ids)
+-        tokens_in = len(out[0].prompt_token_ids)
+-        elapsed = t1 - t0
+-        ttfts.append(elapsed)
+-        tag = "COLD" if i == 0 else "WARM"
+-        print(f"  [{tag}] Request {i}: {elapsed:.3f}s "
+-              f"(in={tokens_in}, out={tokens_out})")
+-
+-    cold_ttft = ttfts[0]
+-    warm_ttfts = ttfts[1:]
+-    avg_warm = sum(warm_ttfts) / len(warm_ttfts) if warm_ttfts else 0
+-
+-    print(f"\nResults:")
+-    print(f"  Cold TTFT (no prefix cache): {cold_ttft:.3f}s")
+-    print(f"  Avg warm TTFT (prefix cached): {avg_warm:.3f}s")
+-    if cold_ttft > 0:
+-        speedup = cold_ttft / avg_warm if avg_warm > 0 else float("inf")
+-        print(f"  Speedup: {speedup:.2f}x")
++    # --- DMS ON ---
++    on_cold, on_warm = _run_ttft(
++        llm, prefix_on, "DMS ON (prefix caching)",
++        suffix_tokens, sequential, max_tokens=max_tokens)
++    results["on"] = (on_cold, on_warm)
+ 
+-    # Batch all at once to measure throughput.
+-    prompts = [SHARED_PREFIX + q for q in QUESTIONS]
+-    t0 = time.perf_counter()
+-    outputs = llm.generate(prompts, params)
+-    t1 = time.perf_counter()
+-    total_out = sum(len(o.outputs[0].token_ids) for o in outputs)
+-    total_in = sum(len(o.prompt_token_ids) for o in outputs)
+-    elapsed = t1 - t0
+-    print(f"\n  Batch ({len(QUESTIONS)} requests): {elapsed:.3f}s")
+-    print(f"  Total input tokens: {total_in}")
+-    print(f"  Total output tokens: {total_out}")
+-    print(f"  Output throughput: {total_out / elapsed:.1f} tok/s")
++    # --- DMS OFF ---
++    from vllm.v1.attention.backends.dms_flash_attn import DMSFlashAttentionImpl
++    saved_configs = []
++    saved_states = []
++    for impl in DMSFlashAttentionImpl._all_instances:
++        saved_configs.append(impl._dms_config)
++        saved_states.append(impl._dms_state)
++        impl._dms_config = None
++        impl._dms_state = None
++
++    off_cold, off_warm = _run_ttft(
++        llm, prefix_off, "DMS OFF (prefix caching)",
++        suffix_tokens, sequential, max_tokens=max_tokens)
++    results["off"] = (off_cold, off_warm)
++
++    # Restore DMS.
++    for impl, cfg, st in zip(
++        DMSFlashAttentionImpl._all_instances, saved_configs, saved_states
++    ):
++        impl._dms_config = cfg
++        impl._dms_state = st
++
++    # --- Summary ---
++    print(f"\n{'=' * 60}")
++    print(f"  SUMMARY (prefix ~{target_tokens} tokens)")
++    print(f"{'=' * 60}")
++    print(f"  {'':25s} {'Cold':>10s} {'Warm':>10s} {'Speedup':>10s}")
++
++    for name, (cold, warm) in results.items():
++        label = {
++            "on": "DMS ON",
++            "off": "DMS OFF",
++        }.get(name, name)
++        speedup = cold / warm if warm > 0 else 0
++        print(f"  {label:25s} {cold*1000:>9.1f}ms "
++              f"{warm*1000:>9.1f}ms {speedup:>9.2f}x")
++
++    if "on" in results and "off" in results:
++        overhead = results["on"][1] / results["off"][1]
++        print(f"\n  DMS ON vs OFF warm: {overhead:.2f}x")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/v1/attention/test_dms.py b/tests/v1/attention/test_dms.py
+index 58678a635..756b487d4 100644
+--- a/tests/v1/attention/test_dms.py
++++ b/tests/v1/attention/test_dms.py
+@@ -16,6 +16,7 @@ from vllm.v1.attention.dms.dms_prefill import (
+     compact_kv_cache,
+     compute_prefill_survivors,
+     initialize_dms_state_from_prefill,
++    prefill_compact_and_init,
+     write_survivors_to_cache,
+ )
+ from vllm.v1.attention.dms.dms_state import DMSState
+diff --git a/vllm/v1/core/kv_cache_coordinator.py b/vllm/v1/core/kv_cache_coordinator.py
+index f2bba886d..1689bb44c 100644
+--- a/vllm/v1/core/kv_cache_coordinator.py
++++ b/vllm/v1/core/kv_cache_coordinator.py
+@@ -225,21 +225,44 @@ class KVCacheCoordinator(ABC):
+         return freed
+ 
+     def cow_shared_blocks_for_dms(
+-        self, request_id: str
++        self,
++        request_id: str,
++        suffix_len: int = 0,
++        window_size: int = 0,
+     ) -> list[tuple[int, int]]:
+-        """CoW all shared blocks for a DMS request across all groups."""
++        """CoW at-risk shared blocks for a DMS request across all groups."""
+         all_replacements: list[tuple[int, int]] = []
+         for manager in self.single_type_managers:
+             all_replacements.extend(
+-                manager.cow_shared_blocks_for_dms(request_id)
++                manager.cow_shared_blocks_for_dms(
++                    request_id, suffix_len, window_size)
+             )
+         return all_replacements
+ 
+-    def count_shared_blocks_for_dms(self, request_id: str) -> int:
+-        """Count blocks with ref_cnt > 1 for a DMS request."""
++    def count_shared_blocks_for_dms(
++        self,
++        request_id: str,
++        suffix_len: int = 0,
++        window_size: int = 0,
++    ) -> int:
++        """Count at-risk shared blocks that need CoW for a DMS request."""
++        if window_size > 0 and suffix_len >= window_size:
++            return 0
++
+         count = 0
+         for manager in self.single_type_managers:
+-            for blk in manager.req_to_blocks.get(request_id, []):
++            blocks = manager.req_to_blocks.get(request_id, [])
++            if not blocks:
++                continue
++
++            if window_size > 0:
++                at_risk_tokens = window_size - suffix_len
++                at_risk_blocks = -((-at_risk_tokens) // manager.block_size)
++                start = max(0, len(blocks) - at_risk_blocks)
++            else:
++                start = 0
++
++            for blk in blocks[start:]:
+                 if not blk.is_null and blk.ref_cnt > 1:
+                     count += 1
+         return count
+diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
+index 50b06583c..eb1b4df6a 100644
+--- a/vllm/v1/core/kv_cache_manager.py
++++ b/vllm/v1/core/kv_cache_manager.py
+@@ -135,6 +135,7 @@ class KVCacheManager:
+         # Drained by the scheduler after each scheduling step.
+         self._dms_cow_pairs: dict[str, list[tuple[int, int]]] = {}
+         self.has_dms = False  # Set by scheduler when DMS config detected
++        self.dms_window_size = 0  # DMS delayed-eviction window size
+ 
+         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
+         # via create_kv_cache_blocks instead of creating new ones to avoid GC
+@@ -347,11 +348,16 @@ class KVCacheManager:
+         has_prefix_hits = (
+             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
+         )
++
++        # DMS CoW: budget extra blocks to replace at-risk shared blocks.
++        # Only prefix blocks within the decode window need CoW — if the
++        # suffix covers the entire window, no prefix blocks are at risk.
++        # Count from new_computed_block_list directly (blocks aren't in
++        # req_to_blocks yet at this point).
+         num_cow_blocks = 0
+         if self.has_dms and has_prefix_hits:
+-            num_cow_blocks = self.count_shared_blocks_for_dms(
+-                request.request_id
+-            )
++            num_cow_blocks = self._count_cow_blocks_from_list(
++                new_computed_block_list, num_new_tokens)
+ 
+         if (num_blocks_to_allocate + num_cow_blocks
+                 > self.block_pool.get_num_free_blocks()):
+@@ -368,10 +374,11 @@ class KVCacheManager:
+                 num_external_computed_tokens=num_external_computed_tokens,
+             )
+ 
+-        # DMS CoW: replace shared blocks with private copies before
+-        # DMS compaction can modify them during forward().
++        # DMS CoW: replace at-risk shared blocks with private copies
++        # before DMS can modify them during decode.
+         if num_cow_blocks > 0:
+-            cow_pairs = self.cow_shared_blocks_for_dms(request.request_id)
++            cow_pairs = self.cow_shared_blocks_for_dms(
++                request.request_id, num_new_tokens, self.dms_window_size)
+             if cow_pairs:
+                 self._dms_cow_pairs[request.request_id] = cow_pairs
+ 
+@@ -433,15 +440,57 @@ class KVCacheManager:
+             request_id, num_blocks_to_keep
+         )
+ 
++    def _count_cow_blocks_from_list(
++        self,
++        block_list: tuple[Sequence[KVCacheBlock], ...],
++        suffix_len: int,
++    ) -> int:
++        """Count at-risk shared blocks from a pre-allocation block list.
++
++        Used before blocks are assigned to req_to_blocks. Counts blocks
++        with ref_cnt > 1 that fall within the decode window's reach into
++        the prefix.
++        """
++        window_size = self.dms_window_size
++        if window_size > 0 and suffix_len >= window_size:
++            return 0
++
++        count = 0
++        for group_idx, blocks in enumerate(block_list):
++            if not blocks:
++                continue
++            if window_size > 0:
++                block_size = self.coordinator.single_type_managers[
++                    group_idx].block_size
++                at_risk_tokens = window_size - suffix_len
++                at_risk_blocks = -((-at_risk_tokens) // block_size)
++                start = max(0, len(blocks) - at_risk_blocks)
++            else:
++                start = 0
++            for blk in blocks[start:]:
++                if not blk.is_null and blk.ref_cnt > 1:
++                    count += 1
++        return count
++
+     def cow_shared_blocks_for_dms(
+-        self, request_id: str
++        self,
++        request_id: str,
++        suffix_len: int = 0,
++        window_size: int = 0,
+     ) -> list[tuple[int, int]]:
+-        """CoW shared blocks for a DMS request. Returns (old, new) pairs."""
+-        return self.coordinator.cow_shared_blocks_for_dms(request_id)
++        """CoW at-risk shared blocks for a DMS request."""
++        return self.coordinator.cow_shared_blocks_for_dms(
++            request_id, suffix_len, window_size)
+ 
+-    def count_shared_blocks_for_dms(self, request_id: str) -> int:
+-        """Count shared blocks that need CoW for a DMS request."""
+-        return self.coordinator.count_shared_blocks_for_dms(request_id)
++    def count_shared_blocks_for_dms(
++        self,
++        request_id: str,
++        suffix_len: int = 0,
++        window_size: int = 0,
++    ) -> int:
++        """Count at-risk shared blocks that need CoW for a DMS request."""
++        return self.coordinator.count_shared_blocks_for_dms(
++            request_id, suffix_len, window_size)
+ 
+     def remove_skipped_blocks(
+         self, request_id: str, total_computed_tokens: int
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index b53f56031..15026acfb 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -237,8 +237,11 @@ class Scheduler(SchedulerInterface):
+             metrics_collector=self.kv_metrics_collector,
+         )
+         # DMS: enable CoW support if DMS config detected.
+-        if getattr(self.cache_config, "dms_config", None) is not None:
++        dms_config = getattr(self.cache_config, "dms_config", None)
++        if dms_config is not None:
+             self.kv_cache_manager.has_dms = True
++            self.kv_cache_manager.dms_window_size = \
++                dms_config.dms_window_size
+ 
+         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
+index fa80d5974..c67da5b36 100644
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -310,12 +310,23 @@ class SingleTypeKVCacheManager(ABC):
+         return len(tail)
+ 
+     def cow_shared_blocks_for_dms(
+-        self, request_id: str
++        self,
++        request_id: str,
++        suffix_len: int = 0,
++        window_size: int = 0,
+     ) -> list[tuple[int, int]]:
+-        """Replace shared blocks (ref_cnt > 1) with private copies for DMS.
++        """Replace at-risk shared blocks with private copies for DMS.
+ 
+-        DMS compacts KV cache in-place. Shared blocks (from prefix caching)
+-        must be copied before compaction to avoid corrupting other requests.
++        DMS only writes to KV positions within its decode window.  If the
++        suffix (new tokens after prefix cache hit) covers the entire window,
++        no prefix blocks are at risk — the window sits entirely in private
++        suffix blocks.  Otherwise, only the tail of the prefix that falls
++        within the window needs CoW.
++
++        Args:
++            request_id: The request whose blocks to check.
++            suffix_len: Number of new tokens after prefix cache hit.
++            window_size: DMS delayed-eviction window size.
+ 
+         Returns:
+             List of (old_block_id, new_block_id) pairs. The caller must
+@@ -325,8 +336,23 @@ class SingleTypeKVCacheManager(ABC):
+         if not req_blocks:
+             return []
+ 
++        # Determine which prefix blocks are at risk.
++        if window_size > 0 and suffix_len >= window_size:
++            # Window is entirely in suffix (private) blocks — no CoW.
++            return []
++
++        if window_size > 0:
++            # Only tail of prefix within the window is at risk.
++            at_risk_tokens = window_size - suffix_len
++            at_risk_blocks = -((-at_risk_tokens) // self.block_size)  # ceil
++            start = max(0, len(req_blocks) - at_risk_blocks)
++        else:
++            # No window info — CoW everything (safe fallback).
++            start = 0
++
+         replacements: list[tuple[int, int]] = []
+-        for i, block in enumerate(req_blocks):
++        for i in range(start, len(req_blocks)):
++            block = req_blocks[i]
+             if block.is_null or block.ref_cnt <= 1:
+                 continue
+             # Allocate a fresh private block.
+-- 
+2.46.0
+
